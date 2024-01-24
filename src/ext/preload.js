@@ -32,6 +32,48 @@ htmx.defineExtension("preload", {
 			to.withCredentials = from.withCredentials;
 		}
 
+		var FakeXHR = function (original, promise) {
+			this.open = function () { };
+			this.overrideMimeType = function () { };
+			this.send = function () { };
+			this.setRequestHeader = function () { };
+			this.onload = function () { };
+			this.onerror = function () { };
+			this.onabort = function () { };
+			this.ontimeout = function () { };
+			this.addEventListener = function (name, fn) {
+				original.addEventListener(name, fn);
+			};
+			this.upload = {
+				addEventListener: function (name, fn) {
+					original.upload.addEventListener(name, fn);
+				},
+			};
+			this.getAllResponseHeaders = function () {
+				return original.getAllResponseHeaders();
+			};
+			this.getResponseHeader = function (name) {
+				return original.getResponseHeader(name);
+			};
+
+			this.withCredentials = false;
+			this.timeout = 0;
+			this.send = function () {
+				fake = this
+				promise.then(function () {
+					copyXhr(original, fake);
+
+					fake.onload();
+				}).catch(function (reason) {
+					copyXhr(original, fake);
+
+					fake[reason]();
+				});
+			};
+			this.send.bind(this);
+			return this;
+		}
+
 		// load handles the actual HTTP fetch, and uses htmx.ajax in cases where we're
 		// preloading an htmx resource (this sends the same HTTP headers as a regular htmx request)
 		var load = function(node) {
@@ -99,44 +141,8 @@ htmx.defineExtension("preload", {
 					r.onabort = function () { reject('onabort'); };
 					r.onerror = function () { reject('onerror'); };
 					r.ontimeout = function () { reject('ontimeout'); };
-					fakexhr = {
-						open: function () { },
-						overrideMimeType: function () { },
-						send: function () {
-							prom.then(function () {
-								copyXhr(r, fakexhr);
 
-								fakexhr.onload();
-							}).catch(function (reason) {
-								copyXhr(r, fakexhr);
-
-								fakexhr[reason]();
-							});
-						},
-						setRequestHeader: function () { },
-						onload: function () { },
-						onerror: function () { },
-						onabort: function () { },
-						ontimeout: function () { },
-						addEventListener: function (name, fn) {
-							r.addEventListener(name, fn);
-						},
-						upload: {
-							addEventListener: function (name, fn) {
-								r.upload.addEventListener(name, fn);
-							},
-						},
-						getAllResponseHeaders: function () {
-							return r.getAllResponseHeaders();
-						},
-						getResponseHeader: function (name) {
-							return r.getResponseHeader(name);
-						},
-
-						withCredentials: false,
-						timeout: 0,
-					}
-					node["hx-use-provided-xhr"] = fakexhr;
+					node.hxUseProvidedXHR = new FakeXHR(r, prom);
 					r.send();
 					return;
 				}
