@@ -18,8 +18,63 @@ htmx.defineExtension("preload", {
 			if (node == undefined) {return undefined;}
 			return node.getAttribute(property) || node.getAttribute("data-" + property) || attr(node.parentElement, property)
 		}
-		
-		// load handles the actual HTTP fetch, and uses htmx.ajax in cases where we're 
+
+		var copyXhr = function (from, to) {
+			to.readyState = from.readyState;
+			to.response = from.response;
+			to.responseText = from.responseText;
+			to.responseType = from.responseType;
+			to.responseURL = from.responseURL;
+			to.responseXML = from.responseXML;
+			to.status = from.status;
+			to.statusText = from.statusText;
+			to.timeout = from.timeout;
+			to.withCredentials = from.withCredentials;
+		}
+
+		var FakeXHR = function (original, promise) {
+			this.open = function () { };
+			this.overrideMimeType = function () { };
+			this.send = function () { };
+			this.setRequestHeader = function () { };
+			this.onload = function () { };
+			this.onerror = function () { };
+			this.onabort = function () { };
+			this.ontimeout = function () { };
+			this.addEventListener = function (name, fn) {
+				original.addEventListener(name, fn);
+			};
+			this.upload = {
+				addEventListener: function (name, fn) {
+					original.upload.addEventListener(name, fn);
+				},
+			};
+			this.getAllResponseHeaders = function () {
+				return original.getAllResponseHeaders();
+			};
+			this.getResponseHeader = function (name) {
+				return original.getResponseHeader(name);
+			};
+
+			this.withCredentials = false;
+			this.timeout = 0;
+			this.send = function () {
+				fake = this
+				promise.then(function () {
+					copyXhr(original, fake);
+
+					fake.onload();
+				}).catch(function (reason) {
+					copyXhr(original, fake);
+
+					fake[reason]();
+				});
+			};
+			this.send.bind(this);
+			return this;
+		}
+
+		// load handles the actual HTTP fetch, and uses htmx.ajax in cases where we're
 		// preloading an htmx resource (this sends the same HTTP headers as a regular htmx request)
 		var load = function(node) {
 
@@ -61,9 +116,33 @@ htmx.defineExtension("preload", {
 				// node.preloadState = TRUE so that requests are not duplicated 
 				// in the future.
 				if (node.getAttribute("href")) {
+					var resolve, reject;
+					var prom = new Promise(function (_resolve, _reject) {
+						resolve = _resolve;
+						reject = _reject;
+					})
 					var r = new XMLHttpRequest();
 					r.open("GET", node.getAttribute("href"));
-					r.onload = function() {done(r.responseText);};
+					r.onload = function () {
+						if (r.status >= 200 && r.status < 300) {
+							resolve();
+						} else {
+							reject();
+						}
+						var to = attr(node, "preload-valid-seconds")
+						if (to !== undefined) {
+							setTimeout(function () {
+								node["hx-use-provided-xhr"] = false;
+								node.preloadState = "READY";
+							}, parseInt(to) * 1000);
+						}
+						done(r.responseText);
+					};
+					r.onabort = function () { reject('onabort'); };
+					r.onerror = function () { reject('onerror'); };
+					r.ontimeout = function () { reject('ontimeout'); };
+
+					node.hxUseProvidedXHR = new FakeXHR(r, prom);
 					r.send();
 					return;
 				}
