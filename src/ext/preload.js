@@ -1,12 +1,35 @@
-// This adds the "preload" extension to htmx.  By default, this will 
-// preload the targets of any tags with `href` or `hx-get` attributes 
+// This adds the "preload" extension to htmx.  By default, this will
+// preload the targets of any tags with `href` or `hx-get` attributes
 // if they also have a `preload` attribute as well.  See documentation
 // for more details
-htmx.defineExtension("preload", {
+htmx.defineExtension("preload", new function () {
 
-	onEvent: function(name, event) {
+	var requestCache = new Map();
+	var cacheSize = ((htmx.config.extensions || {}).preload || {}).cacheSize || 20;
 
-		// Only take actions on "htmx:afterProcessNode"
+	this.onEvent = function (name, event) {
+
+		if (name === "htmx:beforeRequest") {
+			var url = event.detail.requestConfig.path;
+			var method = event.detail.requestConfig.verb;
+			var elt = event.detail.elt;
+			var isPreload = elt.hasAttribute("preload");
+
+			if (method === "get" && isPreload && requestCache.has(url)) {
+				var htmxXhr = event.detail.xhr;
+				var preloadInfo = requestCache.get(url);
+				preloadInfo.promise.then(function () {
+					event.detail.xhr = preloadInfo.xhr;
+					htmxXhr.onload();
+				});
+				return false;
+			}
+
+			return;
+		}
+
+
+		// Register preloads on "htmx:afterProcessNode"
 		if (name !== "htmx:afterProcessNode") {
 			return;
 		}
@@ -18,8 +41,8 @@ htmx.defineExtension("preload", {
 			if (node == undefined) {return undefined;}
 			return node.getAttribute(property) || node.getAttribute("data-" + property) || attr(node.parentElement, property)
 		}
-		
-		// load handles the actual HTTP fetch, and uses htmx.ajax in cases where we're 
+
+		// load handles the actual HTTP fetch, and uses htmx.ajax in cases where we're
 		// preloading an htmx resource (this sends the same HTTP headers as a regular htmx request)
 		var load = function(node) {
 
@@ -43,7 +66,7 @@ htmx.defineExtension("preload", {
 				}
 
 				// Special handling for HX-GET - use built-in htmx.ajax function
-				// so that headers match other htmx requests, then set 
+				// so that headers match other htmx requests, then set
 				// node.preloadState = TRUE so that requests are not duplicated
 				// in the future
 				var hxGet = node.getAttribute("hx-get") || node.getAttribute("data-hx-get")
@@ -57,13 +80,45 @@ htmx.defineExtension("preload", {
 					return;
 				}
 
-				// Otherwise, perform a standard xhr request, then set 
-				// node.preloadState = TRUE so that requests are not duplicated 
+				// Otherwise, perform a standard xhr request, then set
+				// node.preloadState = TRUE so that requests are not duplicated
 				// in the future.
 				if (node.getAttribute("href")) {
+
+					var url = node.getAttribute("href");
+					var resolve, reject;
+					var prom = new Promise(function (_resolve, _reject) {
+						resolve = _resolve;
+						reject = _reject;
+					})
 					var r = new XMLHttpRequest();
-					r.open("GET", node.getAttribute("href"));
-					r.onload = function() {done(r.responseText);};
+					r.open("GET", url);
+					r.onload = function () {
+						if (r.status >= 200 && r.status < 300) {
+							resolve();
+						} else {
+							reject();
+						}
+						var to = attr(node, "preload-valid-seconds")
+						if (to !== undefined) {
+							setTimeout(function () {
+								requestCache.delete(url);
+								node.preloadState = "READY";
+							}, parseInt(to) * 1000);
+						}
+						done(r.responseText);
+					};
+
+					requestCache.set(url, {
+						xhr: r,
+						promise: prom,
+						path: url,
+					});
+
+					while (requestCache.size > cacheSize) {
+						requestCache.delete(requestCache.keys().next().value);
+					}
+
 					r.send();
 					return;
 				}
@@ -83,16 +138,16 @@ htmx.defineExtension("preload", {
 			if (node.preloadState !== undefined) {
 				return;
 			}
-			
+
 			// Get event name from config.
 			var on = attr(node, "preload") || "mousedown"
 			const always = on.indexOf("always") !== -1
 			if (always) {
 				on = on.replace('always', '').trim()
 			}
-						
+
 			// FALL THROUGH to here means we need to add an EventListener
-	
+
 			// Apply the listener to the node
 			node.addEventListener(on, function(evt) {
 				if (node.preloadState === "PAUSE") { // Only add one event listener
@@ -144,4 +199,6 @@ htmx.defineExtension("preload", {
 			node.querySelectorAll("a,[hx-get],[data-hx-get]").forEach(init)
 		})
 	}
-})
+
+	return this;
+}())
